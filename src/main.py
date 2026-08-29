@@ -1,25 +1,41 @@
 from pathlib import Path
 from urllib.parse import urljoin
 from datetime import datetime, timezone
+import json
+import re
 import time
 
 import requests
 from bs4 import BeautifulSoup
+from pydantic import BaseModel, ValidationError
+
 
 START_URL = "https://books.toscrape.com/catalogue/page-1.html"
 CACHE_DIR = Path("cache")
+OUTPUT_DIR = Path("output")
 
 HEADERS = {
     "User-Agent": "FlyRankInternship-A9/1.0 (https://github.com/arindampal0305/scrapper)"
 }
 
 
+class Book(BaseModel):
+    title: str
+    product_url: str
+    price_text: str
+    price_gbp: float
+    availability_text: str
+    rating_text: str
+    description: str | None
+    source_page: str
+    fetched_at: str
+
+
 def fetch_page(url, cache_file):
     cache_file.parent.mkdir(parents=True, exist_ok=True)
 
     if cache_file.exists():
-        content = cache_file.read_text(encoding="utf-8")
-        return content, True
+        return cache_file.read_text(encoding="utf-8"), True
 
     response = requests.get(
         url,
@@ -75,6 +91,16 @@ def discover_books():
     return unique_links, source_pages
 
 
+def normalize_price(price_text):
+    cleaned = price_text.replace("£", "").replace("Â", "").strip()
+    match = re.search(r"\d+(?:\.\d+)?", cleaned)
+
+    if not match:
+        raise ValueError(f"Invalid price: {price_text}")
+
+    return float(match.group())
+
+
 def extract_book(url, source_page, index):
     cache_file = CACHE_DIR / f"book-{index}.html"
 
@@ -95,6 +121,7 @@ def extract_book(url, source_page, index):
 
     title = title_element.get_text(strip=True) if title_element else None
     price_text = price_element.get_text(strip=True) if price_element else None
+
     availability_text = (
         availability_element.get_text(" ", strip=True)
         if availability_element
@@ -102,6 +129,7 @@ def extract_book(url, source_page, index):
     )
 
     rating_text = None
+
     if rating_element:
         classes = rating_element.get("class", [])
         rating_classes = [item for item in classes if item != "star-rating"]
@@ -119,6 +147,7 @@ def extract_book(url, source_page, index):
         "title": title,
         "product_url": url,
         "price_text": price_text,
+        "price_gbp": normalize_price(price_text),
         "availability_text": availability_text,
         "rating_text": rating_text,
         "description": description,
@@ -128,26 +157,54 @@ def extract_book(url, source_page, index):
 
 
 def main():
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
     links, source_pages = discover_books()
 
-    print(f"catalogue_pages=3")
-    print(f"discovered={len(links)}")
-    print(f"unique_urls={len(links)}")
-
-    records = []
+    valid_records = []
+    errors = []
+    seen_urls = set()
 
     for index, url in enumerate(links, start=1):
-        record = extract_book(
-            url,
-            source_pages[url],
-            index
-        )
-        records.append(record)
+        if url in seen_urls:
+            continue
 
-    print(f"detail_pages={len(records)}")
+        seen_urls.add(url)
 
-    if records:
-        print(records[0])
+        try:
+            raw_record = extract_book(
+                url,
+                source_pages[url],
+                index
+            )
+
+            book = Book.model_validate(raw_record)
+            valid_records.append(book.model_dump())
+
+        except (ValidationError, ValueError, RuntimeError) as e:
+            errors.append({
+                "product_url": url,
+                "reason": str(e)
+            })
+
+    books_file = OUTPUT_DIR / "books.json"
+    errors_file = OUTPUT_DIR / "errors.json"
+
+    books_file.write_text(
+        json.dumps(valid_records, indent=2, ensure_ascii=False),
+        encoding="utf-8"
+    )
+
+    errors_file.write_text(
+        json.dumps(errors, indent=2, ensure_ascii=False),
+        encoding="utf-8"
+    )
+
+    print(f"valid_records={len(valid_records)}")
+    print(f"invalid_records={len(errors)}")
+
+    if valid_records:
+        print(json.dumps(valid_records[0], indent=2, ensure_ascii=False))
 
 
 if __name__ == "__main__":
