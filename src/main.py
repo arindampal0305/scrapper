@@ -1,5 +1,6 @@
 from pathlib import Path
 from urllib.parse import urljoin
+from datetime import datetime, timezone
 import time
 
 import requests
@@ -38,6 +39,7 @@ def fetch_page(url, cache_file):
 def discover_books():
     current_url = START_URL
     all_links = []
+    source_pages = {}
     catalogue_pages = 0
 
     while current_url and catalogue_pages < 3:
@@ -45,9 +47,6 @@ def discover_books():
         cache_file = CACHE_DIR / f"catalogue-page-{page_number}.html"
 
         content, cache_hit = fetch_page(current_url, cache_file)
-
-        if not cache_hit and catalogue_pages > 0:
-            time.sleep(0.5)
 
         soup = BeautifulSoup(content, "html.parser")
 
@@ -57,6 +56,7 @@ def discover_books():
             if link and link.get("href"):
                 absolute_url = urljoin(current_url, link["href"])
                 all_links.append(absolute_url)
+                source_pages[absolute_url] = current_url
 
         catalogue_pages += 1
 
@@ -72,12 +72,83 @@ def discover_books():
 
     unique_links = list(dict.fromkeys(all_links))
 
-    print(f"catalogue_pages={catalogue_pages}")
-    print(f"discovered={len(all_links)}")
-    print(f"unique_urls={len(unique_links)}")
+    return unique_links, source_pages
 
-    return unique_links
+
+def extract_book(url, source_page, index):
+    cache_file = CACHE_DIR / f"book-{index}.html"
+
+    content, cache_hit = fetch_page(url, cache_file)
+
+    if not cache_hit:
+        time.sleep(0.5)
+
+    soup = BeautifulSoup(content, "html.parser")
+
+    product_main = soup.select_one("article.product_page")
+
+    title_element = product_main.select_one("h1") if product_main else None
+    price_element = product_main.select_one(".price_color") if product_main else None
+    availability_element = product_main.select_one(".availability") if product_main else None
+    rating_element = product_main.select_one(".star-rating") if product_main else None
+    description_element = soup.select_one("#product_description + p")
+
+    title = title_element.get_text(strip=True) if title_element else None
+    price_text = price_element.get_text(strip=True) if price_element else None
+    availability_text = (
+        availability_element.get_text(" ", strip=True)
+        if availability_element
+        else None
+    )
+
+    rating_text = None
+    if rating_element:
+        classes = rating_element.get("class", [])
+        rating_classes = [item for item in classes if item != "star-rating"]
+        rating_text = rating_classes[0] if rating_classes else None
+
+    description = (
+        description_element.get_text(" ", strip=True)
+        if description_element
+        else None
+    )
+
+    fetched_at = datetime.now(timezone.utc).isoformat()
+
+    return {
+        "title": title,
+        "product_url": url,
+        "price_text": price_text,
+        "availability_text": availability_text,
+        "rating_text": rating_text,
+        "description": description,
+        "source_page": source_page,
+        "fetched_at": fetched_at
+    }
+
+
+def main():
+    links, source_pages = discover_books()
+
+    print(f"catalogue_pages=3")
+    print(f"discovered={len(links)}")
+    print(f"unique_urls={len(links)}")
+
+    records = []
+
+    for index, url in enumerate(links, start=1):
+        record = extract_book(
+            url,
+            source_pages[url],
+            index
+        )
+        records.append(record)
+
+    print(f"detail_pages={len(records)}")
+
+    if records:
+        print(records[0])
 
 
 if __name__ == "__main__":
-    discover_books()
+    main()
